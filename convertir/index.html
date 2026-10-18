@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Convertir pour FilmCraft</title>
+<link rel="icon" href="../favicon.png">
+<style>
+  :root { color-scheme: dark; --bg:#16171b; --panel:#1f2026; --line:#30323a; --text:#e6e6ea; --dim:#9a9ba5; --accent:#3b82f6; --ok:#22c55e; --err:#ef4444; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 20px 48px; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  p.sub { color: var(--dim); margin: 0 0 24px; }
+  a { color: #7aa7ff; }
+  .drop { display:block; border: 2px dashed var(--line); border-radius: 12px; background: var(--panel); padding: 36px 20px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+  .drop.over { border-color: var(--accent); background: #232a3a; }
+  .drop strong { display:block; font-size: 17px; margin-bottom: 6px; }
+  .drop span { color: var(--dim); }
+  .row { display:flex; gap: 12px; align-items:center; flex-wrap: wrap; margin: 18px 0; }
+  select, button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .file { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-top: 10px; }
+  .file .name { font-weight: 600; word-break: break-all; }
+  .file .info { color: var(--dim); font-size: 13px; margin-top: 2px; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 10px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .file.done .bar > div { background: var(--ok); }
+  .file.error .info { color: var(--err); }
+  .file a.dl { display:inline-block; margin-top: 8px; font-weight: 600; }
+  details { margin-top: 28px; color: var(--dim); }
+  details p, details li { font-size: 14px; }
+  summary { cursor: pointer; color: var(--text); }
+  footer { margin-top: 32px; font-size: 12px; color: var(--dim); border-top: 1px solid var(--line); padding-top: 14px; }
+  #status { color: var(--dim); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Convertir pour FilmCraft</h1>
+  <p class="sub">Rend tes vidéos fluides quand tu te déplaces à la main sur la timeline. La conversion se fait sur ton ordinateur : la vidéo n'est envoyée nulle part. <a href="../">← Retour à FilmCraft</a></p>
+
+  <label class="drop" id="drop">
+    <input type="file" id="input" accept="video/*,.mp4,.mov,.mkv,.avi,.webm,.m4v" multiple hidden>
+    <strong>Glisse tes vidéos ici</strong>
+    <span>ou clique pour les choisir (MP4, MOV, MKV…)</span>
+  </label>
+
+  <div class="row">
+    <label for="quality">Qualité :</label>
+    <select id="quality">
+      <option value="1" selected>Normale — ProRes 422 LT (recommandé)</option>
+      <option value="0">Légère — ProRes 422 Proxy (fichiers 2× plus petits)</option>
+      <option value="2">Haute — ProRes 422 (fichiers plus gros)</option>
+    </select>
+    <button id="cancel" disabled>Annuler</button>
+    <span id="status"></span>
+  </div>
+
+  <div id="list"></div>
+
+  <details>
+    <summary>Pourquoi convertir ?</summary>
+    <p>Les vidéos de téléphone, d'appareil photo ou de YouTube (H.264, HEVC) n'enregistrent une image complète que toutes les quelques secondes. Pour afficher une image précise, FilmCraft doit recalculer toutes celles d'avant, d'où les saccades quand tu bouges la tête de lecture. En ProRes, chaque image est complète : le déplacement devient fluide.</p>
+    <ul>
+      <li>La qualité reste identique à l'œil, mais les fichiers sont beaucoup plus gros (compte environ 600 Mo par minute en 1080p, qualité Normale).</li>
+      <li>Utilise Chrome ou Edge. Les vidéos très longues (plus de 15 min en 1080p) peuvent dépasser la mémoire du navigateur : choisis alors la qualité Légère, ou coupe-les avant.</li>
+      <li>La conversion prend du temps. Garde l'onglet ouvert jusqu'à la fin.</li>
+    </ul>
+  </details>
+
+  <footer>
+    Conversion réalisée avec <a href="https://github.com/ffmpegwasm/ffmpeg.wasm">ffmpeg.wasm</a> (MIT) et <a href="https://ffmpeg.org">FFmpeg</a> (GPL-2.0-or-later). Voir <a href="NOTICES.txt">NOTICES.txt</a> pour les licences et le code source.
+    FilmCraft est un logiciel libre de l'équipe ArtCraft (MIT / Apache-2.0) ; cette page n'est pas un produit officiel.
+  </footer>
+</main>
+
+<script type="module">
+import { FFmpeg } from "./lib/ffmpeg/index.js";
+
+const $ = (id) => document.getElementById(id);
+const drop = $("drop"), input = $("input"), list = $("list"), status = $("status"), cancelBtn = $("cancel"), quality = $("quality");
+const coreURL = new URL("lib/core/ffmpeg-core.js", location.href).href;
+const wasmURL = new URL("lib/core/ffmpeg-core.wasm", location.href).href;
+
+let ffmpeg = null;
+let queue = [];
+let busy = false;
+let cancelled = false;
+
+const fmtSize = (b) => b > 1e9 ? (b / 1e9).toFixed(2) + " Go" : (b / 1e6).toFixed(1) + " Mo";
+const fmtTime = (s) => { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m ? `${m} min ${String(s % 60).padStart(2, "0")} s` : `${s} s`; };
+
+async function getFFmpeg() {
+  if (ffmpeg) return ffmpeg;
+  status.textContent = "Chargement du convertisseur (environ 30 Mo, une seule fois)…";
+  const f = new FFmpeg();
+  await f.load({ coreURL, wasmURL });
+  ffmpeg = f;
+  status.textContent = "";
+  return f;
+}
+
+function addFiles(files) {
+  for (const file of files) {
+    const el = document.createElement("div");
+    el.className = "file";
+    el.innerHTML = `<div class="name"></div><div class="info">En attente…</div><div class="bar"><div></div></div>`;
+    el.querySelector(".name").textContent = file.name;
+    list.prepend(el);
+    queue.push({ file, el });
+  }
+  run();
+}
+
+async function run() {
+  if (busy) return;
+  busy = true;
+  cancelBtn.disabled = false;
+  while (queue.length && !cancelled) {
+    const job = queue.shift();
+    await convert(job).catch((e) => fail(job.el, e));
+  }
+  queue.forEach((j) => fail(j.el, "Annulé"));
+  queue = [];
+  busy = false;
+  cancelled = false;
+  cancelBtn.disabled = true;
+  status.textContent = "";
+}
+
+function fail(el, e) {
+  el.classList.add("error");
+  const msg = String(e?.message || e);
+  el.querySelector(".info").textContent = cancelled || msg === "Annulé" || /terminate/i.test(msg) ? "Annulé." :
+    /memory|OOM|allocation|RangeError/i.test(msg) ? "Mémoire du navigateur insuffisante : essaie la qualité Légère, ou une vidéo plus courte." :
+    "Échec de la conversion : " + msg;
+}
+
+async function convert({ file, el }) {
+  const info = el.querySelector(".info"), bar = el.querySelector(".bar > div");
+  const f = await getFFmpeg();
+  const profile = quality.value;
+  const base = file.name.replace(/\.[^.]+$/, "");
+  const outName = `${base} (ProRes).mov`;
+  const dir = "/in";
+  let duration = 0;
+  const start = performance.now();
+
+  const onLog = ({ message }) => {
+    const d = /Duration: (\d+):(\d+):(\d+\.\d+)/.exec(message);
+    if (d && !duration) duration = +d[1] * 3600 + +d[2] * 60 + +d[3];
+    const t = /time=(\d+):(\d+):(\d+\.\d+)/.exec(message);
+    if (t && duration) {
+      const done = +t[1] * 3600 + +t[2] * 60 + +t[3];
+      const p = Math.min(1, done / duration);
+      const elapsed = (performance.now() - start) / 1000;
+      bar.style.width = (p * 100).toFixed(1) + "%";
+      info.textContent = `Conversion… ${Math.floor(p * 100)} %` + (p > 0.02 ? ` — encore environ ${fmtTime(elapsed / p - elapsed)}` : "");
+    }
+  };
+  f.on("log", onLog);
+  info.textContent = "Préparation…";
+  await f.createDir(dir).catch(() => {});
+  await f.mount("WORKERFS", { files: [file] }, dir);
+  try {
+    const code = await f.exec([
+      "-hide_banner", "-i", `${dir}/${file.name}`,
+      "-map", "0:v:0", "-map", "0:a?",
+      "-c:v", "prores_ks", "-profile:v", profile, "-vendor", "apl0", "-pix_fmt", "yuv422p10le",
+      "-c:a", "pcm_s16le", "-ar", "48000",
+      "-stats_period", "0.5",
+      "out.mov",
+    ]);
+    if (code !== 0) throw new Error(cancelled ? "Annulé" : "ffmpeg n'a pas pu lire cette vidéo (code " + code + ")");
+    info.textContent = "Finalisation…";
+    const data = await f.readFile("out.mov");
+    await f.deleteFile("out.mov");
+    const url = URL.createObjectURL(new Blob([data.buffer], { type: "video/quicktime" }));
+    const a = document.createElement("a");
+    a.className = "dl"; a.href = url; a.download = outName;
+    a.textContent = `Télécharger « ${outName} »`;
+    el.append(a);
+    el.classList.add("done");
+    bar.style.width = "100%";
+    info.textContent = `Terminé en ${fmtTime((performance.now() - start) / 1000)} — ${fmtSize(data.byteLength)}. Importe ce fichier dans FilmCraft.`;
+    a.click();
+  } finally {
+    f.off("log", onLog);
+    await f.unmount(dir).catch(() => {});
+  }
+}
+
+cancelBtn.onclick = () => {
+  cancelled = true;
+  if (ffmpeg) { ffmpeg.terminate(); ffmpeg = null; }
+};
+input.onchange = () => { addFiles([...input.files]); input.value = ""; };
+["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", (e) => addFiles([...e.dataTransfer.files].filter((f) => f.type.startsWith("video/") || /\.(mp4|mov|mkv|avi|webm|m4v)$/i.test(f.name))));
+window.addEventListener("beforeunload", (e) => { if (busy) e.preventDefault(); });
+</script>
+</body>
+</html>
